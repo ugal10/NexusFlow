@@ -1,0 +1,77 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: "Cleaned customers from all 3 batches. Batch 2 customer_id resolved via email join."
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+      - name: region
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['NA', 'EMEA', 'APAC']
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['active', 'churned', 'suspended', 'trial']
+
+  - name: stg_subscriptions
+    description: "Cleaned subscriptions from all 3 batches."
+    columns:
+      - name: subscription_id
+        tests:
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['active', 'cancelled', 'expired', 'suspended']
+      - name: mrr
+        tests:
+          - not_null
+
+  - name: stg_invoices
+    description: "Cleaned invoices from all 3 batches."
+    columns:
+      - name: invoice_id
+        tests:
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null
+      - name: amount
+        tests:
+          - not_null
+
+  - name: stg_payments
+    description: "Cleaned payments from all 3 batches."
+    columns:
+      - name: payment_id
+        tests:
+          - not_null
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['completed', 'failed', 'pending', 'refunded']
+
+  - name: stg_plans
+    description: "Reference plan data from batch 3 (most current)."
+    columns:
+      - name: plan_id
+        tests:
+          - not_null
+          - unique
+      - name: base_price
+        tests:
+          - not_null

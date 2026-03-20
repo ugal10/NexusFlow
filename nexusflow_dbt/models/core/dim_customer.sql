@@ -1,5 +1,3 @@
--- dim_customer: built from snapshot, one current row per customer
--- includes dbt_valid_from and dbt_valid_to for historical analysis
 with snapshot as (
     select * from {{ ref('snap_customers') }}
 ),
@@ -22,9 +20,9 @@ current_customers as (
         account_tier,
         dbt_valid_from,
         dbt_valid_to,
-        -- flag current record
-        case when dbt_valid_to is null then true else false end as is_current,
-        dbt_scd_id as customer_sk -- surrogate key
+        case when dbt_valid_to is null then true else false end  as is_current,
+        -- proper surrogate key: customer_id + batch combination
+        dbt_scd_id                                              as customer_sk
     from snapshot
 )
 

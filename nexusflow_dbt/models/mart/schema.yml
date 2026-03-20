@@ -1,0 +1,43 @@
+version: 2
+
+models:
+  - name: mart_mrr
+    description: "Monthly MRR summary by region and plan."
+    columns:
+      - name: batch_id
+        tests:
+          - not_null
+      - name: total_mrr
+        tests:
+          - not_null
+
+  - name: mart_churn
+    description: "Churn and expansion analysis per batch."
+    columns:
+      - name: batch_id
+        tests:
+          - not_null
+      - name: movement_type
+        tests:
+          - not_null
+
+  - name: mart_nrr
+    description: "Net revenue retention by batch and region."
+    columns:
+      - name: batch_id
+        tests:
+          - not_null
+
+  - name: mart_support
+    description: "Support health metrics by region and priority."
+    columns:
+      - name: month
+        tests:
+          - not_null
+
+  - name: mart_usage
+    description: "Product engagement by customer and metric."
+    columns:
+      - name: month
+        tests:
+          - not_null
