@@ -241,5 +241,136 @@ See `docs/decision_log.md` for full details. Summary:
 
 ---
 
+---
+
+## Approach & Design Decisions by Phase
+
+### Phase 1 — Raw Ingestion (`etl/load_raw.py`)
+
+**Drop and recreate tables on every run**
+Simplest idempotency strategy for a raw layer — if the pipeline runs twice, the result is identical. Alternative would be truncate+insert or upsert, but for raw data where we want an exact snapshot of the CSV, full reload is correct.
+
+**Store all columns as TEXT**
+Raw layer should never transform. If we cast to numeric and the source sends `"N/A"`, the load fails. TEXT preserves everything exactly as it came in. Type casting happens in stage where we have control.
+
+**Add `_batch_id`, `_loaded_at`, `_filename` metadata**
+Without batch metadata we can't trace a row back to its source. This enables debugging, reconciliation, and incremental logic downstream.
+
+**Replace sentinel values at load time**
+`-`, `N/A`, empty strings are nulls in disguise. Replacing them at the earliest point means every downstream layer gets clean nulls consistently.
+
+**Separate folder per batch**
+Later batches introduce new files. A flat folder structure would mix batch files together. Separate folders make batch identity explicit and support evolving schemas gracefully.
+
+---
+
+### Phase 2 — Data Profiling (before writing any transforms)
+
+**Inspect actual column names before writing SQL**
+The spec described columns like `mrr_amount`, `line_type`, `tier`, `source_system` — none of which actually existed. Running column inspection queries first saved significant rework. Every model was designed from actual data, not the spec.
+
+**Check distinct values for key categorical columns**
+We checked `status`, `region`, and other categoricals to find real values before writing `accepted_values` tests. This is how we found status values like `trial`, `expired`, `suspended` that weren't documented.
+
+**Check ID formats across all batches**
+We verified all 3 batches use `CUST-XXX` format — but more importantly discovered batch_2 had no `customer_id` column at all. Profiling this early meant we could design the fix before building the stage model.
+
+**Compare row counts across batches**
+We found `batch_3_adjustments` dropped from 180 to 120 rows. Catching anomalies at profiling time means they go into the decision log as documented findings rather than silent data quality issues.
+
+---
+
+### Phase 3 — Stage Layer
+
+**Views, not tables**
+Stage models are just cleaning and renaming — no aggregation. Views are always current, cost no storage, and rebuild instantly.
+
+**Union all batches in stage, not in raw**
+Raw preserves exact source structure. Unioning is a transformation — it belongs in stage. This keeps each layer's responsibility clean.
+
+**Resolve batch_2 customer_id via email join**
+Batch_2 had no customer_id — a real data quality issue. Email was the most reliable stable identifier available. We verified 500/500 match rate before committing to this approach. Company_name was considered but rejected due to typo/format risk.
+
+**Normalize status to lowercase, region to uppercase**
+Inconsistent casing breaks GROUP BY and WHERE clauses silently. Normalizing in stage means every downstream model gets consistent values regardless of source system behavior.
+
+**Include late_usage_jan in stg_usage_events**
+Late-arriving January events are real January data — excluding them would undercount January usage. Unioning them into the stage model is the correct approach.
+
+**Corrections loaded to raw but not applied in stage**
+The corrections table has a generic patch structure — blindly applying it could overwrite valid data. Some apparent errors are actually valid business records. We documented this as a known limitation rather than implementing it incorrectly.
+
+---
+
+### Phase 4 — Core Layer (Star Schema)
+
+**SCD Type 2 for dim_customer via dbt snapshots**
+We found 8 customers changed status between batch 1 and batch 3. SCD1 (overwrite) would lose this history. SCD2 preserves it with `dbt_valid_from`/`dbt_valid_to` for point-in-time analysis.
+
+**`check` strategy on specific columns, not `timestamp`**
+The data has no reliable `updated_at` column. The `check` strategy compares specific column values between runs and creates a new snapshot record when any change. We chose `status`, `region`, `account_tier`, `email`, `company_name` — the columns most likely to change meaningfully.
+
+**fct_mrr_movements using full outer join between batches**
+We need to capture all movement types including churn (customer in batch N but not N+1) and new (customer in N+1 but not N). A regular join would miss these. Full outer join is the only correct approach for MRR movement analysis.
+
+**dim_date as a generated date spine**
+Date dimensions should never depend on transactional data — if no events happened on a date, it shouldn't be missing from the dimension. `generate_series` creates a complete gap-free spine regardless of what's in the fact tables.
+
+**Enrich fact tables with region at core layer**
+Region is needed for filtering in every mart model. Joining to dim_customer in every mart query would be repetitive and slower. Adding region to facts at core makes mart models simpler and more performant.
+
+---
+
+### Phase 5 — Mart Layer
+
+**Canonical metric definitions from Finance for MRR/Churn, Product for NRR**
+We read all three business rules documents and found genuine conflicts. Finance's MRR definition (subscriptions only, invoice date) is the industry standard for board reporting. Product's NRR definition (including contraction) is more conservative and accurate. Every rejected alternative is documented in `docs/decision_log.md`.
+
+**Comments in mart models referencing decision_log.md**
+When someone reads `mart_mrr.sql` in 6 months they shouldn't have to guess why overage is excluded. The comment makes the rationale immediately traceable.
+
+---
+
+### Phase 6 — Data Quality & Testing
+
+**Schema tests + custom data tests**
+Schema tests (not_null, unique, accepted_values) catch structural integrity issues automatically on every `dbt test` run. We added them to every key column across all layers — 44 tests total.
+
+**accepted_values tests on status and region columns**
+These are the columns most likely to get unexpected values as the source system evolves. If a new status like `paused` appears, the test fails and alerts us immediately rather than silently propagating.
+
+**not_null tests on foreign keys**
+A null customer_id in fct_subscriptions means orphaned data that can't be attributed to any customer. These tests ensure referential integrity across dbt models.
+
+---
+
+### Phase 7 — Access Control
+
+**RLS at the database layer, not application layer**
+Application-layer filtering can be bypassed if a user connects directly via DBeaver or psql. Database-layer RLS cannot be bypassed regardless of how the user connects.
+
+**`user_region_map` lookup table for RLS policies**
+Hardcoding region values in RLS policies would require ALTER POLICY every time a new manager is added. A lookup table means adding a new regional manager is just an INSERT — no DDL changes needed.
+
+**Separate roles for admin, analyst, viewer, regional_manager**
+Principle of least privilege. Each role gets exactly the access it needs — no more.
+
+---
+
+### Known Gaps & How We'd Address Them
+
+**Timezone normalization**
+We cast timestamps but didn't normalize to UTC. In production: `timestamp AT TIME ZONE 'UTC'` in every stage model, with a documented assumption about each source system's timezone.
+
+**Corrections application**
+Loaded to raw, not applied downstream. In production: a corrections-application CTE in each stage model that checks `batch_3_corrections` for patches and applies them before the cleaned output.
+
+**Deduplication of late_usage_jan**
+Unioned but not deduplicated against original January events. In production: `ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY _batch_id DESC)` dedup step in `stg_usage_events`.
+
+**Incremental models**
+All models are full refresh. In production: `fct_invoices`, `fct_payments`, and `fct_usage_events` would be incremental with a watermark on `created_at` or `event_date`.
+
+---
 ## Contact
 Built as part of NexusFlow Senior Data Engineer take-home exercise.
