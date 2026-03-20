@@ -1,0 +1,23 @@
+name: 'nexusflow_dbt'
+version: '1.0.0'
+profile: 'nexusflow_dbt'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  nexusflow_dbt:
+    stage:
+      +schema: stage
+      +materialized: view
+    core:
+      +schema: core
+      +materialized: table
+    mart:
+      +schema: mart
+      +materialized: table
